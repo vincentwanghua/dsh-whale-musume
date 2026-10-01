@@ -1840,6 +1840,7 @@
       }
     }
     if (!layout.hidden) setPose(layout.src, true, moodActive ? memory.moodAnimate : true);
+    renderWeatherStrip();
 
     /* celebration override: 3 quick pats — type once, then keep the finished
        bubble stable so repeated renders/reconciles can never re-jump it */
@@ -2194,6 +2195,7 @@
     var computed = core.computeState(memory.state, signals, now, Math.random);
     render(computed);
     weatherFxReconcile(computed);
+    multiWeatherEnsure(false);
     if (readPref("pet")) idleChatTick(now);
     refreshBalance(now);
     maybeAnnounceBalance(now);
@@ -2415,6 +2417,162 @@
       weatherState.coords = beforeCoords;
       weatherState.key = beforeKey;
       throw error;
+    });
+  };
+
+  /* ---------- multi-city weather list (settings-managed) ----------
+     whale-moe:weatherList = [{name, lat, lon}]（上限 8）。
+     添加时已存坐标，刷新直接打 forecast、不再地理编码；
+     缺坐标的旧条目回退 geocodeCity。
+     首城由设置面板同步进旧的 weatherCity/weatherLat/weatherLon，
+     上面的天气特效与台词逻辑保持不变。 */
+  var WEATHER_LIST_MAX = 8;
+  var multiWeather = { sig: "", entries: {} };
+
+  function readWeatherList() {
+    var raw = null;
+    try { raw = root.localStorage.getItem("whale-moe:weatherList"); } catch (e) { return null; }
+    if (raw === null) return null;
+    try {
+      var list = JSON.parse(raw);
+      return Array.isArray(list) ? list.filter(function (e) { return e && typeof e.name === "string" && e.name; }) : [];
+    } catch (e) { return []; }
+  }
+  function weatherList() {
+    var list = readWeatherList();
+    if (list === null) {
+      var legacy = readWeather("weatherCity").trim();
+      if (legacy) {
+        var coords = readCoords();
+        list = [{ name: legacy, lat: coords ? coords.lat : null, lon: coords ? coords.lon : null }];
+      } else {
+        list = [];
+      }
+    }
+    return list.slice(0, WEATHER_LIST_MAX);
+  }
+  function weatherEntryKey(e) {
+    var lat = e.lat === null || e.lat === undefined ? NaN : Number(e.lat);
+    var lon = e.lon === null || e.lon === undefined ? NaN : Number(e.lon);
+    return e.name + "@" + (isFinite(lat) && isFinite(lon) ? lat.toFixed(3) + "," + lon.toFixed(3) : "?");
+  }
+  function fetchCityWeather(entry) {
+    var lat = entry.lat === null || entry.lat === undefined ? NaN : Number(entry.lat);
+    var lon = entry.lon === null || entry.lon === undefined ? NaN : Number(entry.lon);
+    var coordsP = (isFinite(lat) && isFinite(lon)) ? Promise.resolve({ lat: lat, lon: lon }) : geocodeCity(entry.name);
+    return coordsP.then(function (coords) {
+      var url = "https://api.open-meteo.com/v1/forecast?latitude=" + coords.lat + "&longitude=" + coords.lon + "&current=temperature_2m,weather_code,wind_speed_10m,relative_humidity_2m&timezone=auto" + weatherKeyParam();
+      return weatherJson(url, 8000).then(function (json) {
+        if (!json || !json.current) throw new Error("no current weather");
+        return {
+          temp: Number(json.current.temperature_2m),
+          code: String(json.current.weather_code),
+          wind: Number(json.current.wind_speed_10m || 0),
+          humidity: Number(json.current.relative_humidity_2m || 0),
+          fetchedAt: Date.now()
+        };
+      });
+    });
+  }
+  function multiWeatherEnsure(force) {
+    var now = Date.now();
+    var list = weatherList();
+    var sig = list.map(weatherEntryKey).join("|");
+    if (sig !== multiWeather.sig) {
+      multiWeather.sig = sig;
+      var keep = {};
+      list.forEach(function (e) { keep[weatherEntryKey(e)] = 1; });
+      Object.keys(multiWeather.entries).forEach(function (k) { if (!keep[k]) delete multiWeather.entries[k]; });
+      force = true;
+    }
+    var pending = [];
+    list.forEach(function (e) {
+      var key = weatherEntryKey(e);
+      var cur = multiWeather.entries[key];
+      if (cur && cur.inflight) return;
+      var fresh = cur && cur.ok && now - cur.fetchedAt < WEATHER_DATA_MS;
+      if (!force && fresh) return;
+      if (cur && !cur.ok && now < (cur.retryAt || 0)) return;
+      multiWeather.entries[key] = { inflight: true, ok: cur ? cur.ok : false, fetchedAt: cur ? cur.fetchedAt : 0, temp: cur ? cur.temp : null, code: cur ? cur.code : "", retryAt: cur ? cur.retryAt : 0 };
+      pending.push(fetchCityWeather(e).then(function (w) {
+        multiWeather.entries[key] = { inflight: false, ok: true, fetchedAt: w.fetchedAt, temp: w.temp, code: w.code, wind: w.wind, humidity: w.humidity, retryAt: 0 };
+      }, function () {
+        multiWeather.entries[key] = { inflight: false, ok: false, fetchedAt: 0, temp: null, code: "", retryAt: Date.now() + 60 * 60000 };
+      }));
+    });
+    if (pending.length) {
+      return Promise.all(pending).then(function () { schedule(); }, function () { schedule(); });
+    }
+    return Promise.resolve(null);
+  }
+  function renderWeatherStrip() {
+    var rootNode = doc.querySelector("[data-dsh-whale-root]");
+    if (!rootNode) return;
+    var strip = rootNode.querySelector("[data-dsh-whale-weather-strip]");
+    var lines = [];
+    weatherList().forEach(function (e) {
+      var cur = multiWeather.entries[weatherEntryKey(e)];
+      if (!cur || !cur.ok || cur.temp === null || cur.temp === undefined) return;
+      var w = core.weatherText(cur.code);
+      lines.push(e.name + " " + Math.round(cur.temp) + "°C " + w.emoji + w.label);
+    });
+    if (!lines.length) { if (strip) strip.remove(); return; }
+    if (!strip) {
+      strip = doc.createElement("div");
+      strip.setAttribute("data-dsh-whale-weather-strip", "true");
+      rootNode.appendChild(strip);
+    }
+    strip.textContent = "";
+    lines.forEach(function (line) {
+      var row = doc.createElement("div");
+      row.setAttribute("data-dsh-whale-weather-line", "true");
+      row.textContent = line;
+      strip.appendChild(row);
+    });
+  }
+  /* 设置面板搜索候选：Open-Meteo 地理编码(城市/县) + Photon(OSM，区/县)。
+     合并去重后返回 [{name, lat, lon, path, source}]。 */
+  function omSearch(q) {
+    return weatherJson("https://geocoding-api.open-meteo.com/v1/search?name=" + encodeURIComponent(q) + "&count=10&language=zh&format=json" + weatherKeyParam(), 8000).then(function (json) {
+      var results = json && json.results ? json.results : [];
+      return results.map(function (r) {
+        var path = [r.country, r.admin1, r.admin2].filter(Boolean).join(" · ");
+        return { name: r.name || q, lat: Number(r.latitude), lon: Number(r.longitude), path: path, source: "Open-Meteo" };
+      }).filter(function (c) { return isFinite(c.lat) && isFinite(c.lon); });
+    });
+  }
+  function photonSearch(q, layer) {
+    return weatherJson("https://photon.komoot.io/api/?q=" + encodeURIComponent(q) + "&limit=6&layer=" + layer, 8000).then(function (json) {
+      var feats = json && json.features ? json.features : [];
+      return feats.map(function (f) {
+        var p = (f && f.properties) || {};
+        var coords = f && f.geometry && f.geometry.coordinates;
+        if (!p.name || !coords || coords.length < 2) return null;
+        var path = [p.country, p.state, p.city, p.district].filter(Boolean).join(" · ");
+        return { name: p.name, lat: Number(coords[1]), lon: Number(coords[0]), path: path, source: "OSM" };
+      }).filter(function (c) { return c && isFinite(c.lat) && isFinite(c.lon); });
+    });
+  }
+  root.DshWhaleMoeWeatherSearch = function (query) {
+    var q = String(query || "").trim();
+    if (!q) return Promise.reject(new Error("请输入城市、县或区名"));
+    return Promise.all([
+      omSearch(q).catch(function () { return []; }),
+      photonSearch(q, "district").catch(function () { return []; }),
+      photonSearch(q, "city").catch(function () { return []; })
+    ]).then(function (parts) {
+      var seen = {};
+      var out = [];
+      parts.forEach(function (list) {
+        list.forEach(function (c) {
+          var k = c.name + "|" + c.lat.toFixed(2) + "|" + c.lon.toFixed(2);
+          if (seen[k]) return;
+          seen[k] = 1;
+          out.push(c);
+        });
+      });
+      if (!out.length) throw new Error("未找到「" + q + "」；区/县可试「广州市越秀区」这类全称，或拼音/英文名");
+      return out.slice(0, 10);
     });
   };
 
