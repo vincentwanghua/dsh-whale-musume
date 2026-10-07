@@ -758,6 +758,13 @@ body[data-dsh-whale-night]::after {
   line-height: 16px;
   white-space: nowrap;
 }
+/* 底部灰色小字：天气更新于 …（无底色） */
+[data-dsh-whale-weather-updated] {
+  padding: 0 8px;
+  color: var(--dsw-alias-label-tertiary, #666);
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+}
 /* mini/设置面板紧凑态不占地方 */
 [data-dsh-whale-root][data-dsh-whale-dense] [data-dsh-whale-weather-strip] { display: none; }
->>>>>>> fa9252e (feat(weather): multi-city weather list + search (Open-Meteo+Photon) + strip below avatar)

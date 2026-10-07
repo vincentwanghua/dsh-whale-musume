@@ -2530,9 +2530,11 @@
     if (!rootNode) return;
     var strip = rootNode.querySelector("[data-dsh-whale-weather-strip]");
     var lines = [];
+    var latest = 0;
     weatherList().forEach(function (e) {
       var cur = multiWeather.entries[weatherEntryKey(e)];
       if (!cur || !cur.ok || cur.temp === null || cur.temp === undefined) return;
+      if (cur.fetchedAt > latest) latest = cur.fetchedAt;
       var w = core.weatherText(cur.code);
       lines.push(e.name + " " + Math.round(cur.temp) + "°C " + w.emoji + w.label);
     });
@@ -2549,6 +2551,14 @@
       row.textContent = line;
       strip.appendChild(row);
     });
+    if (latest) {
+      var d = new Date(latest);
+      var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var foot = doc.createElement("div");
+      foot.setAttribute("data-dsh-whale-weather-updated", "true");
+      foot.textContent = "天气更新于 " + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+      strip.appendChild(foot);
+    }
   }
   /* 设置面板搜索候选：Open-Meteo 地理编码(城市/县) + Photon(OSM，区/县)。
      合并去重后返回 [{name, lat, lon, path, source}]。 */
