@@ -598,6 +598,17 @@
       items.push({ label: "小游戏：接点心", action: function () { openCatchGame(); } });
     }
     items.push(
+      { label: "刷新天气", action: function () {
+        var list = weatherList();
+        if (!list.length) { showLine("还没有添加天气城市：设置 > 看板娘 > 天气 里添加"); return; }
+        showLine("正在刷新 " + list.length + " 个城市的天气…");
+        refreshWeatherNow().then(function () {
+          var ok = 0;
+          list.forEach(function (e) { var c = multiWeather.entries[weatherEntryKey(e)]; if (c && c.ok) ok += 1; });
+          var fail = list.length - ok;
+          showLine(fail ? "天气刷新完成：" + ok + " 城成功、" + fail + " 城失败" : "天气已刷新（" + ok + " 城）");
+        });
+      } },
       { label: "回到原位", action: function () { try { root.localStorage.removeItem("whale-moe:floatX"); root.localStorage.removeItem("whale-moe:floatY"); } catch (e) { /* ignore */ } reconcile(); } },
       { label: "打开看板娘设置", action: function () {
         /* DSH 新版设置入口是纯图标按钮(无文本),旧版是文本“设置”按钮:
@@ -2504,6 +2515,15 @@
       return Promise.all(pending).then(function () { schedule(); }, function () { schedule(); });
     }
     return Promise.resolve(null);
+  }
+  function refreshWeatherNow() {
+    /* 手动刷新（右键菜单）：绕过新鲜窗口与失败退避，旧单城天气（特效/台词）一并刷 */
+    Object.keys(multiWeather.entries).forEach(function (k) {
+      var e = multiWeather.entries[k];
+      if (e && !e.inflight) e.retryAt = 0;
+    });
+    weatherState.retryAt = 0;
+    return Promise.all([weatherEnsure(true), multiWeatherEnsure(true)]);
   }
   function renderWeatherStrip() {
     var rootNode = doc.querySelector("[data-dsh-whale-root]");
